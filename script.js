@@ -109,29 +109,42 @@ function main() {
         const vertexShaderSource = `#version 300 es
 
 in vec2 a_position;
-in mat3 a_matrix;
+in vec3 a_transform;
+
+out vec2 v_texcoord;
+
+uniform vec2 screenSize;
 
 void main() {
-
-    gl_Position = vec4((a_matrix * vec3(a_position, 1)).xy, 0, 1);
+    mat3 rotationMatrix = mat3(
+    cos(a_transform.z), -sin(a_transform.z), 0.0,
+    sin(a_transform.z), cos(a_transform.z), 0.0,
+    0.0, 0.0, 1.0);
+    
+    vec3 rotatedPos = rotationMatrix * vec3(a_position, 1);
+    gl_Position = vec4(rotatedPos.xy + a_transform.xy, 0, 1);
+    v_texcoord = ((rotatedPos.xy + a_transform.xy) + vec2(1.0)) * -0.5;
 }
 `;
         const fragmentShaderSource = `#version 300 es
 precision highp float;
 
+in vec2 v_texcoord;
+uniform sampler2D u_texture;
+
 out vec4 outColor;
 uniform vec4 u_color;
 void main() {
-  outColor = u_color;
+  outColor = texture(u_texture, v_texcoord);
 }
 `;
         const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
         const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
 
         const program = createProgram(gl, vertexShader, fragmentShader);
-
+        gl.useProgram(program);
         const positionAttributeLocation = gl.getAttribLocation(program, "a_position");
-        const matrixAttributeLocation = gl.getAttribLocation(program, "a_matrix");
+        const transformAttributeLocation = gl.getAttribLocation(program, "a_transform");
         const colorUniformLocation = gl.getUniformLocation(program, "u_color");
 
         const vao = gl.createVertexArray();
@@ -152,47 +165,50 @@ void main() {
         ]), gl.STATIC_DRAW);
 
         const count = boids.length;
-        const matrixSize = 9;
-        const matrices = new Float32Array(count * matrixSize);
-        const matrixI = m3.identity();
+        const instanceSize = 3;
+        const data = new Float32Array(count * instanceSize);
         for (let i = 0; i < count; i++) {
-            const boid = boids[i];
-            const translatedMatrix = m3.translate(matrixI, boid.position.x, boid.position.y);
-            const rotatedMatrix = m3.rotate(translatedMatrix, boid.rotation);
-            matrices.set(rotatedMatrix, i * matrixSize);
+            data[i * instanceSize] = boids[i].position[0];
+            data[i * instanceSize + 1] = boids[i].position[1];
+            data[i * instanceSize + 2] = -Math.atan2(boids[i].velocity[1], boids[i].velocity[0]);
         }
 
-        const matrixBuffer = gl.createBuffer();
-        gl.bindBuffer(gl.ARRAY_BUFFER, matrixBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, matrices, gl.STATIC_DRAW);
+        console.log(data);
+
+
+        const transformBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, transformBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
 
         // setup vertex attribute for position
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.enableVertexAttribArray(positionAttributeLocation);
         gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
 
-        gl.bindBuffer(gl.ARRAY_BUFFER, matrixBuffer);
-        gl.enableVertexAttribArray(matrixAttributeLocation);
-        const matrixByteSize = 9 * 4; // 9 elements, 4 bytes each
-        // matrix attributes are unsupported, I have to treat each column manually
+        gl.bindBuffer(gl.ARRAY_BUFFER, transformBuffer);
+        gl.enableVertexAttribArray(transformAttributeLocation);
+        gl.vertexAttribPointer(transformAttributeLocation, 3, gl.FLOAT, false, 0, 0);
+        gl.vertexAttribDivisor(transformAttributeLocation, 1);
 
-        // first column
-        gl.vertexAttribPointer(matrixAttributeLocation, 3, gl.FLOAT, false, matrixByteSize, 0 * 4);
-        gl.vertexAttribDivisor(matrixAttributeLocation, 1);
-        // second column
-        gl.enableVertexAttribArray(matrixAttributeLocation + 1);
-        gl.vertexAttribPointer(matrixAttributeLocation + 1, 3, gl.FLOAT, false, matrixByteSize, 3 * 4);
-        gl.vertexAttribDivisor(matrixAttributeLocation + 1, 1);
-        // third column
-        gl.enableVertexAttribArray(matrixAttributeLocation + 2);
-        gl.vertexAttribPointer(matrixAttributeLocation + 2, 3, gl.FLOAT, false, matrixByteSize, 6 * 4);
-        gl.vertexAttribDivisor(matrixAttributeLocation + 2, 1);
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 255, 255]));
+
+        const image = new Image();
+        image.src = "resources/gradient.png";
+        image.addEventListener('load', () => {
+           gl.bindTexture(gl.TEXTURE_2D, texture);
+           gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+           gl.generateMipmap(gl.TEXTURE_2D);
+        });
+
+
 
         return {
-            matrices: matrices,
             vao: vao,
             program: program,
-            matrixBuffer: matrixBuffer,
+            transformBuffer: transformBuffer,
             colorUniformLocation: colorUniformLocation
         }
     }
@@ -214,7 +230,6 @@ void main() {
         vec2.add(boid.velocity, boid.velocity, velChange);
 
         if (vec2.length(boid.velocity) > maxVelocity) {
-            console.log("max");
             vec2.normalize(boid.velocity, boid.velocity);
             vec2.scale(boid.velocity, boid.velocity, maxVelocity);
         }
@@ -304,13 +319,8 @@ void main() {
         return averageVelocity;
     }
 
-
-
-    const recalculateMatrices = (boids, deltaTime) => {
-        const matrixI = m3.identity();
-        const matrixSize = 9;
-        const matrices = new Float32Array(boids.length * matrixSize);
-
+    const recalculateTranslateAndRotation = (boids, deltaTime) => {
+        const result = new Float32Array(boids.length * 3); // translate.x, translate.y, rotation
         for (let i = 0; i < boids.length; i++) {
             const vel = vec2.fromValues(0, 0);
             if (settings.cohesion === true) {
@@ -323,22 +333,14 @@ void main() {
             if (settings.alignment === true) {
                 vec2.add(vel, vel, alignment(i, boids));
             }
-
-
             updateBoid(boids[i], deltaTime, vel);
-            const translatedMatrix = m3.translate(matrixI, boids[i].position[0], boids[i].position[1]);
-            const rotation = -Math.atan2(boids[i].velocity[1], boids[i].velocity[0]);
-            const rotatedMatrix = m3.rotate(translatedMatrix, rotation);
-            matrices.set(rotatedMatrix, i * matrixSize);
+
+            result[3*i] = boids[i].position[0];
+            result[3*i + 1] = boids[i].position[1];
+            result[3*i + 2] = -Math.atan2(boids[i].velocity[1], boids[i].velocity[0]);
         }
-        return matrices
+        return result;
     }
-
-    // TODO: optimizations:
-    // 1. Pass only translation and rotation to gpu, construct matrices there
-    // 2. Make a gpu pre-pass: boids will hold indices, one vector od positions and velocity exists and is updated on gpu side
-    //
-
 
     const boidCount = 200;
     const boids = [];
@@ -377,11 +379,11 @@ void main() {
         }
 
         gl.clearColor(0, 0, 0, 1);
-        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-        const matrices = recalculateMatrices(boids, delta);
-        gl.bindBuffer(gl.ARRAY_BUFFER, state.matrixBuffer);
-        gl.bufferData(gl.ARRAY_BUFFER, matrices, gl.STATIC_DRAW);
+        const translationAndRotation = recalculateTranslateAndRotation(boids, delta);
+        gl.bindBuffer(gl.ARRAY_BUFFER, state.transformBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, translationAndRotation, gl.DYNAMIC_DRAW);
 
         gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, boids.length);
         requestAnimationFrame(renderLoop);
